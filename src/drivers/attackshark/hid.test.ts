@@ -366,10 +366,11 @@ test("the receiver's model id names the mouse, never the PID", async () => {
   await patient.readStatus();
   assert.ok(Date.now() - started < 1_000);
 
-  for (const productId of [0xfa55, 0xfa61]) {
-    const wired = new AttackSharkHidClient(x11Entry(productId, [[0x01, 0x80], [0x0c, 0x01]]));
-    assert.equal(wired.displayName(), "Attack Shark mouse (wired)");
-  }
+  const wired = new AttackSharkHidClient(x11Entry(0xfa55, [[0x01, 0x80], [0x0c, 0x01]]));
+  assert.equal(wired.displayName(), "Attack Shark mouse (wired)");
+  // 0xfa61 is the R1's own wired id in the vendor software.
+  const r1Wired = new AttackSharkHidClient(x11Entry(0xfa61, [[0x01, 0x80], [0x0c, 0x01]]));
+  assert.equal(r1Wired.displayName(), "Attack Shark R1");
 });
 
 test("the declared DPI report length picks the 56-byte receiver form", async () => {
@@ -689,13 +690,50 @@ test("Bridge on Windows: models with no established frame shape still stay read-
   const { unit, sent, push } = windowsBridgeX11Receiver();
   const client = new AttackSharkHidClient(unit, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
   await client.open();
-  // The R1 (0x10) uses a different DPI map per the reference driver.
-  push([0x03, 0x10, 0x40, 0x01, 0x05]);
+  // The X3 (0x4d) has no frame checked against its vendor page yet.
+  push([0x03, 0x4d, 0x50, 0x00, 0x06]);
   const status = await client.readStatus();
-  assert.equal(status.name, "Attack Shark R1");
+  assert.equal(status.name, "Attack Shark X3");
   assert.equal(status.ui?.settingsReady, false);
   await assert.rejects(() => client.setDpi(800), /not reachable from a browser/);
   assert.deepEqual(sent, []);
+});
+
+test("Bridge on Windows: the R1 on its receiver is writable with the X11 frame", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { unit, sent, push } = windowsBridgeX11Receiver();
+  const client = new AttackSharkHidClient(unit, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+  await client.open();
+  push([0x03, 0x10, 0x40, 0x01, 0x07]);
+  const status = await client.readStatus();
+  assert.equal(status.name, "Attack Shark R1");
+  assert.equal(status.batteryPercent, 70);
+  assert.equal(status.ui?.settingsReady, true);
+
+  assert.equal(await client.setPollingRate(500), 500);
+  assert.deepEqual(sent, [{ reportId: 0x06, data: [0x09, 0x01, 0x02, 0xfd, 0, 0, 0, 0] }]);
+  sent.length = 0;
+
+  // The R1 page mirrors the page mask into byte 7, like the X11.
+  assert.equal(await client.setDpiStageValue(5, 16000), 16000);
+  assert.equal(sent[0].reportId, 0x04);
+  assert.equal(sent[0].data.length, 55);
+  assert.equal(sent[0].data[5], 0b100000);
+  assert.equal(sent[0].data[6], 0b100000);
+});
+
+test("Bridge on Windows: the R1 by cable (0xfa61) is named and writable", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { unit, sent } = windowsBridgeX11Receiver(0xfa61);
+  const client = new AttackSharkHidClient(unit, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+  const status = await client.readStatus();
+  assert.equal(status.name, "Attack Shark R1");
+  assert.equal(status.connectionType, "Wired");
+  assert.equal(status.ui?.settingsReady, true);
+  assert.equal(await client.setPollingRate(1000), 1000);
+  assert.deepEqual(sent, [{ reportId: 0x06, data: [0x09, 0x01, 0x01, 0xfe, 0, 0, 0, 0] }]);
 });
 
 test("Bridge on Windows: unnumbered mouse and keyboard reports are not receiver messages", async () => {
@@ -771,9 +809,9 @@ test("Bridge on Windows: receiver writes keep the minimum gap", async () => {
   assert.ok(sentAt[1] - sentAt[0] >= 195, `second write came ${sentAt[1] - sentAt[0]} ms after the first`);
 });
 
-test("Bridge on Windows: wired X11-family PIDs name no model and stay read-only", async () => {
+test("Bridge on Windows: a wired X11 (0xfa55) names no model and stays read-only", async () => {
   resetAttackSharkX11RuntimeState();
-  for (const productId of [0xfa55, 0xfa61]) {
+  for (const productId of [0xfa55]) {
     const { unit, sent } = windowsBridgeX11Receiver();
     (unit as { productId: number }).productId = productId;
     (unit as { productName: string }).productName = "USB Gaming Mouse";

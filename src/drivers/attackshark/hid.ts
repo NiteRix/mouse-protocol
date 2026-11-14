@@ -122,12 +122,20 @@ const X11_MODEL_ID = 0x55;
  * byte 6.
  */
 const X8_SE_MODEL_ID = 0x02;
+/**
+ * Attack Shark R1. The vendor software's R1 page (AttackShark.exe 2025-11)
+ * builds the X11's 56-byte report 0x04 frame with the same DPI tables (byte 7
+ * mirrors byte 6), the same 0x06 polling frame, and reads battery in tenths.
+ * Its wired product id is 0xfa61.
+ */
+const R1_MODEL_ID = 0x10;
+const R1_WIRED_PID = 0xfa61;
 /** The X8 SE's own wired product id (vendor software, X8 SE model page). */
 const X8_SE_WIRED_PID = 0x2120;
 const X11_RECEIVER_MODELS: ReadonlyMap<number, ReceiverModel> = new Map([
   [X11_MODEL_ID, attackShark("X11", "percent")],
   // xb-bx/attack-shark-r1-driver reports charge as p2 * 10.
-  [0x10, attackShark("R1", "tenths")],
+  [R1_MODEL_ID, attackShark("R1", "tenths")],
   [0x85, attackShark("X6", "tenths")],
   [0x4d, attackShark("X3")],
   [0x4e, attackShark("X3 Max")],
@@ -260,7 +268,10 @@ const X11_FAMILY_NAMES: ReadonlyMap<number, string> = new Map([
  * the X8 SE exposes the same interfaces as its receiver (keyboard, mouse,
  * interface 2 with COL01-COL04).
  */
-const X11_WIRED_MODELS: ReadonlyMap<number, number> = new Map([[X8_SE_WIRED_PID, X8_SE_MODEL_ID]]);
+const X11_WIRED_MODELS: ReadonlyMap<number, number> = new Map([
+  [X8_SE_WIRED_PID, X8_SE_MODEL_ID],
+  [R1_WIRED_PID, R1_MODEL_ID],
+]);
 
 const X11_FAMILY_PIDS: ReadonlySet<number> = new Set(X11_FAMILY_NAMES.keys());
 
@@ -270,9 +281,9 @@ const X11_FAMILY_PIDS: ReadonlySet<number> = new Set(X11_FAMILY_NAMES.keys());
 const X11_WIRELESS_PID = 0xfa60;
 
 // The X11 family's DPI report 0x04 is documented for the X11 (wired 0xfa55,
-// wireless 0xfa60). The R1 (0xfa61) uses a different DpiBuilder/step map in
-// the reference driver, so it stays out of this path until ported.
-const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60, X8_SE_WIRED_PID]);
+// wireless 0xfa60). The vendor software builds the same frame for the X8 SE
+// (wired 0x2120) and the R1 (wired 0xfa61); see X8_SE_MODEL_ID / R1_MODEL_ID.
+const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60, X8_SE_WIRED_PID, R1_WIRED_PID]);
 
 // A rebuilt config collection (see x11RebuiltConfigCollection) carries no
 // report sizes and no hint of which firmware is behind it, so writes through
@@ -282,12 +293,14 @@ const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60, X8_SE_WIRED_P
 // same receiver and protocol and resolves to the receiver's 56-byte DPI
 // frame, so it is enabled too. The X8 SE (0x02) builds the same 56-byte
 // report 0x04 frame and polling report 0x06 in the vendor software, with byte 7
-// used as a separate page mask (see X8_SE_MODEL_ID). Models whose frame shape
-// is not established (R1 0x10, X3 0x4d/0x4e, X6 0x85, …) stay read-only.
+// used as a separate page mask (see X8_SE_MODEL_ID); the R1 (0x10) builds the
+// X11 frame itself (see R1_MODEL_ID). Models whose frame shape is not
+// established (X3 0x4d/0x4e, X6 0x85, …) stay read-only.
 const X11_REBUILT_CONFIG_MODELS: ReadonlySet<number> = new Set([
   DELUX_M600_PRO_MODEL_ID,
   X11_MODEL_ID,
   X8_SE_MODEL_ID,
+  R1_MODEL_ID,
 ]);
 
 // The firmware has no cheap "current DPI" command, so — exactly like the
