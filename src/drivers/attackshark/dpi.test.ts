@@ -101,3 +101,34 @@ test("decodeX11DpiReport rejects a bad signature or checksum", () => {
 
   assert.equal(decodeX11DpiReport(new Uint8Array([0x38, 0x01])), null);
 });
+
+test("buildX11DpiReport keeps byte 7 clear for firmware with separate page masks (X8 SE)", () => {
+  const config = {
+    stages: [800, 1600, 11000, 16000, 21000, 22000],
+    activeStage: 2,
+    angleSnap: false,
+    rippleControl: true,
+  };
+  const x11 = buildX11DpiReport(config);
+  const x8se = buildX11DpiReport({ ...config, separatePageMasks: true });
+
+  // Stages 4-6 are above 12,000: byte 6 flags them on both firmwares.
+  assert.equal(x11[6], 0b111000);
+  assert.equal(x8se[6], 0b111000);
+  // The X11 mirrors the mask into byte 7; the X8 SE reserves byte 7 for > 22,000.
+  assert.equal(x11[7], 0b111000);
+  assert.equal(x8se[7], 0x00);
+
+  // Everything else is the same frame, and the checksum still covers bytes 3..49.
+  for (let i = 0; i < 50; i++) {
+    if (i !== 7) assert.equal(x8se[i], x11[i], `byte ${i}`);
+  }
+  const decoded = decodeX11DpiReport(x8se);
+  assert.deepEqual(decoded?.stages, config.stages);
+  assert.equal(decoded?.activeStage, 2);
+});
+
+test("separatePageMasks changes nothing for tables at or below 12,000", () => {
+  const config = { stages: [400, 800, 1600, 3200, 6400, 12000], activeStage: 3, angleSnap: true, rippleControl: false };
+  assert.deepEqual([...buildX11DpiReport({ ...config, separatePageMasks: true })], [...buildX11DpiReport(config)]);
+});

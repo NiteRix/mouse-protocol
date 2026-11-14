@@ -133,6 +133,13 @@ export interface X11DpiConfig {
   rippleControl: boolean;
   /** Wired units take only the first 52 bytes. */
   wired?: boolean;
+  /**
+   * Firmware that reads byte 7 as its own page mask (Attack Shark X8 SE).
+   * There byte 6 alone flags stages above 12,000, and byte 7 is reserved for
+   * the sensor's range above 22,000, which this codec does not encode, so it
+   * stays zero. Without it, byte 7 mirrors byte 6 as the X11 firmware expects.
+   */
+  separatePageMasks?: boolean;
 }
 
 function checksum(buffer: Uint8Array): number {
@@ -163,7 +170,7 @@ export function buildX11DpiReport(config: X11DpiConfig): Uint8Array {
     buffer[16 + i] = high ? 0x01 : 0x00;
   }
   buffer[6] = mask;
-  buffer[7] = mask;
+  buffer[7] = config.separatePageMasks ? 0x00 : mask;
   // 14, 15, 22, 23 stay zero.
   buffer[24] = config.activeStage;
 

@@ -112,6 +112,16 @@ const attackShark = (model: string, battery?: ReceiverModel["battery"]): Receive
  * Shark ids: HarukaYamamoto0/attack-shark-x11-driver src/core/devices.ts.
  */
 const X11_MODEL_ID = 0x55;
+/**
+ * Attack Shark X8 SE, 2.4 GHz receiver only: the vendor software (Attack
+ * Shark X8 driver, AttackShark.exe 2025-11) has no wired 0xfa65 path for it.
+ * Its receiver message reports charge as a plain 1-100 percentage
+ * (`03 02 40 01 64` captured at 100 %). Its DPI frame is the X11's 56-byte
+ * report 0x04 with the same stage map up to 22,000, except that byte 7 is a
+ * second page mask for the sensor's range above 22,000 rather than a copy of
+ * byte 6.
+ */
+const X8_SE_MODEL_ID = 0x02;
 const X11_RECEIVER_MODELS: ReadonlyMap<number, ReceiverModel> = new Map([
   [X11_MODEL_ID, attackShark("X11", "percent")],
   // xb-bx/attack-shark-r1-driver reports charge as p2 * 10.
@@ -123,7 +133,7 @@ const X11_RECEIVER_MODELS: ReadonlyMap<number, ReceiverModel> = new Map([
   [0x07, attackShark("X11 SE", "percent")],
   [0xbe, attackShark("X11 Pro")],
   [0xb1, attackShark("X1")],
-  [0x02, attackShark("X8 SE")],
+  [X8_SE_MODEL_ID, attackShark("X8 SE", "percent")],
   [0x06, attackShark("X8 Plus")],
   [0x08, attackShark("X8 Pro")],
   [0x04, attackShark("G3")],
@@ -258,9 +268,15 @@ const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60]);
 // path (docs/delux-m600-pro-testing.md). The M600 Pro was captured through
 // Bridge on Windows; the genuine X11 (model id 0x55 — issue #161) rides the
 // same receiver and protocol and resolves to the receiver's 56-byte DPI
-// frame, so it is enabled too. Models whose frame shape is not established
-// (R1 0x10, X3 0x4d/0x4e, X6 0x85, …) stay read-only.
-const X11_REBUILT_CONFIG_MODELS: ReadonlySet<number> = new Set([DELUX_M600_PRO_MODEL_ID, X11_MODEL_ID]);
+// frame, so it is enabled too. The X8 SE (0x02) builds the same 56-byte
+// report 0x04 frame and polling report 0x06 in the vendor software, with byte 7
+// used as a separate page mask (see X8_SE_MODEL_ID). Models whose frame shape
+// is not established (R1 0x10, X3 0x4d/0x4e, X6 0x85, …) stay read-only.
+const X11_REBUILT_CONFIG_MODELS: ReadonlySet<number> = new Set([
+  DELUX_M600_PRO_MODEL_ID,
+  X11_MODEL_ID,
+  X8_SE_MODEL_ID,
+]);
 
 // The firmware has no cheap "current DPI" command, so — exactly like the
 // reference driver — the last full six-stage table this process wrote (or
@@ -463,6 +479,16 @@ export class AttackSharkHidClient {
   private queue: Promise<unknown> = Promise.resolve();
   private batteryPercent: number | null = null;
   private listening = false;
+  /**
+   * Bridge on Windows may list each top-level collection of the receiver as
+   * its own device (hidapi gives every collection its own path). The entry
+   * the registry claims is then the Consumer one, while receiver messages
+   * arrive on the 0x0a battery entry and config reports go to the 0x0b one.
+   * These hold those sibling entries when this client had to find them.
+   */
+  private messageSibling: HIDDevice | null = null;
+  private configSibling: HIDDevice | null = null;
+  private siblingsSearched = false;
 
   constructor(device: HIDDevice, options: { batteryWaitMs?: number; receiverWriteGapMs?: number } = {}) {
     this.device = device;
@@ -493,11 +519,16 @@ export class AttackSharkHidClient {
       || (this.x11RebuiltConfig && X11_REBUILT_CONFIG_MODELS.has(this.receiverModelId ?? -1));
   }
 
+  /** The entry config reports go to: a split-out 0x0b sibling, else this device. */
+  private get configDevice(): HIDDevice {
+    return this.configSibling ?? this.device;
+  }
+
   /** True for an X11 DPI unit whose config collection was rebuilt without reports. */
   private get x11RebuiltConfig(): boolean {
     return this.family === "1d57-x11"
       && X11_DPI_PIDS.has(this.device.productId)
-      && x11RebuiltConfigCollection(this.device);
+      && x11RebuiltConfigCollection(this.configDevice);
   }
 
   /** True when this unit's DPI report 0x04 can be driven. */
@@ -548,6 +579,10 @@ export class AttackSharkHidClient {
       this.device.addEventListener("inputreport", this.onInputReport);
       this.listening = true;
     }
+    if (this.family === "1d57-x11" && !this.siblingsSearched) {
+      this.siblingsSearched = true;
+      await this.attachSplitSiblings().catch(() => undefined);
+    }
   }
 
   async close(): Promise<void> {
@@ -556,7 +591,50 @@ export class AttackSharkHidClient {
       this.device.removeEventListener("inputreport", this.onInputReport);
       this.listening = false;
     }
+    const siblings = [this.messageSibling, this.configSibling];
+    if (this.messageSibling) this.messageSibling.removeEventListener("inputreport", this.onInputReport);
+    this.messageSibling = null;
+    this.configSibling = null;
+    this.siblingsSearched = false;
+    for (const sibling of siblings) {
+      if (sibling?.opened) await sibling.close().catch(() => undefined);
+    }
     if (this.device.opened) await this.device.close();
+  }
+
+  /**
+   * When the claimed entry carries neither the receiver's 0x0a message
+   * collection nor its 0x0b config collection, look for them as separate
+   * entries of the same receiver (Bridge on Windows, one entry per
+   * collection). WebHID never splits a USB interface this way, so in Chrome
+   * this finds nothing and changes nothing.
+   */
+  private async attachSplitSiblings(): Promise<void> {
+    if (!X11_FAMILY_PIDS.has(this.device.productId) || this.nativeConfig) return;
+    const ownMessages = this.device.collections.some((c) => c.usagePage === X11_BATTERY_USAGE_PAGE);
+    const ownConfig = this.device.collections.some((c) => c.usagePage === X11_CONFIG_USAGE_PAGE);
+    if (ownMessages && ownConfig) return;
+    const hid = (globalThis as { navigator?: { hid?: HID } }).navigator?.hid;
+    if (!hid) return;
+    const siblings = (await hid.getDevices()).filter((candidate) =>
+      candidate !== this.device
+      && candidate.vendorId === this.device.vendorId
+      && candidate.productId === this.device.productId);
+    if (!ownMessages) {
+      const messages = siblings.find((c) => c.collections.some((col) => col.usagePage === X11_BATTERY_USAGE_PAGE));
+      if (messages) {
+        if (!messages.opened) await messages.open();
+        messages.addEventListener("inputreport", this.onInputReport);
+        this.messageSibling = messages;
+      }
+    }
+    if (!ownConfig) {
+      const config = siblings.find((c) => c.collections.some((col) => col.usagePage === X11_CONFIG_USAGE_PAGE));
+      if (config) {
+        if (!config.opened) await config.open();
+        this.configSibling = config;
+      }
+    }
   }
 
   async startNotifications(): Promise<boolean> {
@@ -692,6 +770,7 @@ export class AttackSharkHidClient {
           && this.isWireless()
           && (this.nativeConfig
             || this.device.collections.some((collection) => declaresInputReport(collection, BATTERY_REPORT_ID))
+            || this.messageSibling !== null
             || (this.x11RebuiltConfig
               && this.device.collections.some((collection) => collection.usagePage === X11_BATTERY_USAGE_PAGE))),
         statusNote: this.family === "1d57-x11" && !this.x11ConfigReachable
@@ -795,6 +874,7 @@ export class AttackSharkHidClient {
       angleSnap: state.angleSnap,
       rippleControl: state.rippleControl,
       wired: this.x11UsesShortDpiReport(),
+      separatePageMasks: this.receiverModelId === X8_SE_MODEL_ID,
     });
     // The buffer's leading byte is the report id; WebHID/Tauri take it
     // separately. Copy so the payload is a plain ArrayBuffer-backed view.
@@ -1033,7 +1113,7 @@ export class AttackSharkHidClient {
         if (wait > 0) await this.delay(wait);
       }
       try {
-        await this.device.sendFeatureReport(reportId, data);
+        await this.configDevice.sendFeatureReport(reportId, data);
       } finally {
         if (paced) x11LastReceiverWriteAt.set(this.device.productId, Date.now());
       }

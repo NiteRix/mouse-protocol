@@ -508,6 +508,157 @@ test("Bridge on Windows: the X11 is named by its receiver message and becomes wr
   assert.deepEqual(reads, []);
 });
 
+test("Bridge on Windows: the X8 SE reports its battery and becomes writable", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { unit, sent, reads, push } = windowsBridgeX11Receiver();
+  const client = new AttackSharkHidClient(unit, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+  await client.open();
+
+  // Captured on an X8 SE receiver: 03 02 40 01 64, battery event at 100 %.
+  push([0x03, 0x02, 0x40, 0x01, 0x64]);
+  let status = await client.readStatus();
+  assert.equal(status.name, "Attack Shark X8 SE");
+  assert.equal(status.batteryPercent, 100);
+  assert.equal(status.ui?.settingsReady, true);
+  assert.equal(status.ui?.statusNote, undefined);
+  assert.deepEqual(status.supportedPollingRates, [125, 250, 500, 1000]);
+  assert.ok(status.dpi > 0);
+  assert.deepEqual(reads, []);
+
+  push([0x03, 0x02, 0x40, 0x01, 0x3c]);
+  status = await client.readStatus();
+  assert.equal(status.batteryPercent, 60);
+
+  assert.equal(await client.setPollingRate(500), 500);
+  assert.deepEqual(sent, [{ reportId: 0x06, data: [0x09, 0x01, 0x02, 0xfd, 0, 0, 0, 0] }]);
+  sent.length = 0;
+
+  // A stage above 12,000: byte 6 (data[5] without the report id) flags it,
+  // byte 7 (data[6]) stays clear on this firmware.
+  assert.equal(await client.setDpiStageValue(5, 16000), 16000);
+  assert.equal(sent[0].reportId, 0x04);
+  assert.equal(sent[0].data.length, 55);
+  assert.deepEqual(sent[0].data.slice(0, 2), [0x38, 0x01]);
+  assert.equal(sent[0].data[5], 0b100000);
+  assert.equal(sent[0].data[6], 0x00);
+  assert.deepEqual(reads, []);
+});
+
+// The same 0xfa60 receiver as a newer Bridge lists it on Windows: one entry
+// per top-level collection (hid-1 … hid-7), each declaring nothing but its own
+// collection. Diagnostics from an X8 SE (OpenMouse BETA v2.0.28f).
+function windowsBridgeSplitReceiver() {
+  const sentTo: Array<{ usagePage: number; reportId: number; data: number[] }> = [];
+  const listeners = new Map<number, (event: { reportId: number; data: DataView }) => void>();
+  const entry = (usagePage: number, usage: number, input: number[]) => {
+    const unit = {
+      vendorId: 0x1d57,
+      productId: 0xfa60,
+      productName: "2.4G Wireless Device",
+      collections: [{
+        usagePage,
+        usage,
+        type: 1,
+        children: [],
+        inputReports: input.map((reportId) => ({ reportId, items: [] })),
+        outputReports: [],
+        featureReports: [],
+      }],
+      opened: false,
+      open() { (this as { opened: boolean }).opened = true; return Promise.resolve(); },
+      close() { (this as { opened: boolean }).opened = false; return Promise.resolve(); },
+      sendFeatureReport(reportId: number, data: BufferSource) {
+        sentTo.push({ usagePage, reportId, data: [...new Uint8Array(data as ArrayBuffer)] });
+        return Promise.resolve();
+      },
+      receiveFeatureReport() {
+        return Promise.reject(new DOMException("not declared", "NotAllowedError"));
+      },
+      addEventListener(type: string, listener: (event: { reportId: number; data: DataView }) => void) {
+        if (type === "inputreport") listeners.set(usagePage, listener);
+      },
+      removeEventListener(type: string) { if (type === "inputreport") listeners.delete(usagePage); },
+    } as unknown as HIDDevice;
+    return unit;
+  };
+  const entries = [
+    entry(0x01, 0x06, [0]),
+    entry(0x0c, 0x01, [2]),
+    entry(0x01, 0x80, [1]),
+    entry(0x0a, 0x00, [0]),
+    entry(0x01, 0x06, [0]),
+    entry(0x0b, 0x00, []),
+    entry(0x01, 0x02, [0]),
+  ];
+  const push = (usagePage: number, bytes: number[]) => {
+    listeners.get(usagePage)?.({ reportId: 0x00, data: new DataView(new Uint8Array(bytes).buffer) });
+  };
+  return { entries, consumer: entries[1], sentTo, listeners, push };
+}
+
+test("Bridge on Windows, one entry per collection: the claimed Consumer entry finds its message and config siblings", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { entries, consumer, sentTo, listeners, push } = windowsBridgeSplitReceiver();
+  // Only the Consumer entry is claimable on its own; the others are refused.
+  assert.deepEqual(entries.map((unit) => AttackSharkHidClient.isSupported(unit)), [false, true, false, false, false, false, false]);
+
+  const priorNavigator = (globalThis as { navigator?: unknown }).navigator;
+  Object.defineProperty(globalThis, "navigator", {
+    value: { hid: { getDevices: async () => entries } },
+    configurable: true,
+  });
+  try {
+    const client = new AttackSharkHidClient(consumer, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+    await client.open();
+    assert.ok(listeners.has(0x0a), "listens on the 0x0a message entry");
+    assert.equal(entries[3].opened, true);
+    assert.equal(entries[5].opened, true);
+
+    push(0x0a, [0x03, 0x02, 0x40, 0x01, 0x55]);
+    const status = await client.readStatus();
+    assert.equal(status.name, "Attack Shark X8 SE");
+    assert.equal(status.batteryPercent, 85);
+    assert.equal(status.ui?.settingsReady, true);
+    assert.equal(status.ui?.forceShowBattery, true);
+    assert.equal(status.ui?.statusNote, undefined);
+    assert.ok(status.dpi > 0);
+
+    // Config reports go to the 0x0b entry, not the Consumer one.
+    assert.equal(await client.setPollingRate(1000), 1000);
+    assert.deepEqual(sentTo, [{ usagePage: 0x0b, reportId: 0x06, data: [0x09, 0x01, 0x01, 0xfe, 0, 0, 0, 0] }]);
+
+    await client.close();
+    assert.equal(listeners.has(0x0a), false);
+    assert.equal(entries[3].opened, false);
+    assert.equal(entries[5].opened, false);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", { value: priorNavigator, configurable: true });
+  }
+});
+
+test("Bridge split entries: without a named model the config sibling stays read-only", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { entries, consumer, sentTo } = windowsBridgeSplitReceiver();
+  const priorNavigator = (globalThis as { navigator?: unknown }).navigator;
+  Object.defineProperty(globalThis, "navigator", {
+    value: { hid: { getDevices: async () => entries } },
+    configurable: true,
+  });
+  try {
+    const client = new AttackSharkHidClient(consumer, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+    const status = await client.readStatus();
+    assert.equal(status.name, "Attack Shark mouse (2.4 GHz receiver)");
+    assert.equal(status.ui?.settingsReady, false);
+    await assert.rejects(() => client.setPollingRate(500), /not reachable from a browser/);
+    assert.deepEqual(sentTo, []);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", { value: priorNavigator, configurable: true });
+  }
+});
+
 test("Bridge on Windows: models with no established frame shape still stay read-only", async () => {
   resetAttackSharkX11DpiState();
   resetAttackSharkX11RuntimeState();
