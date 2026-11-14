@@ -385,7 +385,7 @@ test("the declared DPI report length picks the 56-byte receiver form", async () 
 // preparsed data. The 0x0a battery collection reads as unnumbered and the
 // 0x0b config collection declares nothing
 // (captures/delux-m600-pro/windows-bridge.txt).
-function windowsBridgeX11Receiver() {
+function windowsBridgeX11Receiver(productId = 0xfa60) {
   const sent: Array<{ reportId: number; data: number[] }> = [];
   const reads: number[] = [];
   const listeners = new Map<string, (event: { reportId: number; data: DataView }) => void>();
@@ -406,7 +406,7 @@ function windowsBridgeX11Receiver() {
   });
   const unit = {
     vendorId: 0x1d57,
-    productId: 0xfa60,
+    productId,
     productName: "2.4G Wireless Device",
     collections: [
       collection(0x01, 0x80, [1]),
@@ -596,6 +596,30 @@ function windowsBridgeSplitReceiver() {
   };
   return { entries, consumer: entries[1], sentTo, listeners, push };
 }
+
+test("X8 SE on its cable (0x2120) is named by its product id and writable without a receiver message", async () => {
+  resetAttackSharkX11DpiState();
+  resetAttackSharkX11RuntimeState();
+  const { unit, sent } = windowsBridgeX11Receiver(0x2120);
+  assert.equal(AttackSharkHidClient.isSupported(unit), true);
+  const client = new AttackSharkHidClient(unit, { batteryWaitMs: 0, receiverWriteGapMs: 0 });
+  const status = await client.readStatus();
+  assert.equal(status.name, "Attack Shark X8 SE");
+  assert.equal(status.connectionType, "Wired");
+  assert.equal(status.ui?.settingsReady, true);
+  assert.ok(status.dpi > 0);
+
+  assert.equal(await client.setPollingRate(1000), 1000);
+  assert.deepEqual(sent, [{ reportId: 0x06, data: [0x09, 0x01, 0x01, 0xfe, 0, 0, 0, 0] }]);
+  sent.length = 0;
+
+  // Same 56-byte X8 SE frame as over the receiver: byte 7 stays clear.
+  assert.equal(await client.setDpiStageValue(5, 16000), 16000);
+  assert.equal(sent[0].reportId, 0x04);
+  assert.equal(sent[0].data.length, 55);
+  assert.equal(sent[0].data[5], 0b100000);
+  assert.equal(sent[0].data[6], 0x00);
+});
 
 test("Bridge on Windows, one entry per collection: the claimed Consumer entry finds its message and config siblings", async () => {
   resetAttackSharkX11DpiState();

@@ -122,6 +122,8 @@ const X11_MODEL_ID = 0x55;
  * byte 6.
  */
 const X8_SE_MODEL_ID = 0x02;
+/** The X8 SE's own wired product id (vendor software, X8 SE model page). */
+const X8_SE_WIRED_PID = 0x2120;
 const X11_RECEIVER_MODELS: ReadonlyMap<number, ReceiverModel> = new Map([
   [X11_MODEL_ID, attackShark("X11", "percent")],
   // xb-bx/attack-shark-r1-driver reports charge as p2 * 10.
@@ -248,7 +250,17 @@ const X11_FAMILY_NAMES: ReadonlyMap<number, string> = new Map([
   [0xfa55, "Attack Shark mouse (wired)"],
   [0xfa60, "Attack Shark mouse (2.4 GHz receiver)"],
   [0xfa61, "Attack Shark mouse (wired)"],
+  [X8_SE_WIRED_PID, "Attack Shark X8 SE (wired)"],
 ]);
+
+/**
+ * Wired PIDs that belong to one model. The vendor software gives each model
+ * page its own wired id (X8 SE 0x2120, others 0x2122/0x2124/0x2126/…), unlike
+ * the shared 0xfa60 receiver, so the id alone names the mouse. Over the cable
+ * the X8 SE exposes the same interfaces as its receiver (keyboard, mouse,
+ * interface 2 with COL01-COL04).
+ */
+const X11_WIRED_MODELS: ReadonlyMap<number, number> = new Map([[X8_SE_WIRED_PID, X8_SE_MODEL_ID]]);
 
 const X11_FAMILY_PIDS: ReadonlySet<number> = new Set(X11_FAMILY_NAMES.keys());
 
@@ -260,7 +272,7 @@ const X11_WIRELESS_PID = 0xfa60;
 // The X11 family's DPI report 0x04 is documented for the X11 (wired 0xfa55,
 // wireless 0xfa60). The R1 (0xfa61) uses a different DpiBuilder/step map in
 // the reference driver, so it stays out of this path until ported.
-const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60]);
+const X11_DPI_PIDS: ReadonlySet<number> = new Set([0xfa55, 0xfa60, X8_SE_WIRED_PID]);
 
 // A rebuilt config collection (see x11RebuiltConfigCollection) carries no
 // report sizes and no hint of which firmware is behind it, so writes through
@@ -644,7 +656,7 @@ export class AttackSharkHidClient {
   /** The known model id the last receiver message carried, if any. */
   private get receiverModelId(): number | null {
     if (this.family !== "1d57-x11") return null;
-    return x11RuntimeFor(this.device.productId).modelId;
+    return X11_WIRED_MODELS.get(this.device.productId) ?? x11RuntimeFor(this.device.productId).modelId;
   }
 
   /** The model a receiver message identified, if any. */
