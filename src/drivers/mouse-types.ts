@@ -386,6 +386,8 @@ export interface MouseStatus {
   dpiStagesY?: number[];
   /** RGB colour for each DPI stage, as lowercase #rrggbb. */
   dpiStageColors?: string[];
+  /** How many stages, from the first, the DPI button cycles (where editable). */
+  dpiStageCount?: number;
   /** Active DPI stage index into `dpiStages` (0-based). */
   activeDpiStage?: number;
   ninjutsoSystemMode?: "High Speed" | "Competitive" | "Ultra" | null;

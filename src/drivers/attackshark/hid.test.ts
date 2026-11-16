@@ -168,7 +168,7 @@ test("native X11 adapter writes polling over 0x06 and DPI over 0x04", async () =
   assert.equal(status.angleSnapping, false);
   assert.equal(status.rippleControl, true);
   assert.deepEqual(status.ui?.dpiStageEditor, {
-    maxStages: 6, countEditable: false, minDpi: 50, maxDpi: 22000, stepDpi: 50,
+    maxStages: 6, countEditable: true, minDpi: 50, maxDpi: 22000, stepDpi: 50,
   });
 
   const applied = await client.setPollingRate(500);

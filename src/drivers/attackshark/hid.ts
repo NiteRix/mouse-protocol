@@ -15,6 +15,12 @@ import {
   X11_DPI_STAGE_COUNT,
   X11_DPI_STEP,
   X11_DPI_VALUES,
+  X11_DPI_ALL_STAGES_MASK,
+  X11_DPI_DEFAULT_COLORS,
+  x11ColorHex,
+  x11ParseColor,
+  x11StageCount,
+  x11StageMask,
 } from "../../compx/x11-dpi.ts";
 
 // Attack Shark mice ship from multiple OEMs with different VIDs and protocols:
@@ -313,6 +319,10 @@ interface X11DpiState {
   activeStage: number;
   angleSnap: boolean;
   rippleControl: boolean;
+  /** Byte 5: the stages the DPI button cycles. */
+  stageMask: number;
+  /** Bytes 25..48: each stage's DPI light (plus two spare slots). */
+  colors: [number, number, number][];
 }
 
 const x11DpiStates = new Map<number, X11DpiState>();
@@ -325,6 +335,8 @@ function x11DpiStateFor(productId: number): X11DpiState {
       activeStage: X11_DPI_DEFAULT_ACTIVE,
       angleSnap: false,
       rippleControl: true,
+      stageMask: X11_DPI_ALL_STAGES_MASK,
+      colors: X11_DPI_DEFAULT_COLORS.map((rgb) => [rgb[0], rgb[1], rgb[2]] as [number, number, number]),
     };
     x11DpiStates.set(productId, state);
   }
@@ -805,7 +817,7 @@ export class AttackSharkHidClient {
           ? {
             dpiStageEditor: {
               maxStages: X11_DPI_STAGE_COUNT,
-              countEditable: false,
+              countEditable: true,
               minDpi: X11_DPI_MIN,
               maxDpi: X11_DPI_MAX,
               stepDpi: X11_DPI_STEP,
@@ -822,6 +834,8 @@ export class AttackSharkHidClient {
           activeDpiStage: dpiState.activeStage - 1,
           angleSnapping: dpiState.angleSnap,
           rippleControl: dpiState.rippleControl,
+          dpiStageCount: x11StageCount(dpiState.stageMask),
+          dpiStageColors: dpiState.colors.slice(0, X11_DPI_STAGE_COUNT).map(x11ColorHex),
         }
         : {}),
       pollingRateHz,
@@ -898,6 +912,8 @@ export class AttackSharkHidClient {
       activeStage: state.activeStage,
       angleSnap: state.angleSnap,
       rippleControl: state.rippleControl,
+      stageMask: state.stageMask,
+      colors: state.colors,
       wired: this.x11UsesShortDpiReport(),
       separatePageMasks: this.receiverModelId === X8_SE_MODEL_ID,
     });
@@ -942,6 +958,8 @@ export class AttackSharkHidClient {
       state.activeStage = decoded.activeStage;
       state.angleSnap = decoded.angleSnap;
       state.rippleControl = decoded.rippleControl;
+      if (decoded.stageMask !== undefined) state.stageMask = decoded.stageMask;
+      if (decoded.colors) state.colors = decoded.colors.map((rgb) => [rgb[0], rgb[1], rgb[2]] as [number, number, number]);
     } catch {
       // No read-back on this firmware/transport; keep the cached table.
     }
@@ -1007,6 +1025,46 @@ export class AttackSharkHidClient {
       };
     }
     return stage;
+  }
+
+  /**
+   * How many stages (from stage 1) the DPI button cycles, 1..6. The active
+   * stage moves inside the new range when it falls outside it.
+   */
+  async setDpiStageCount(count: number): Promise<number> {
+    this.requireX11Dpi();
+    const state = x11DpiStateFor(this.device.productId);
+    state.stageMask = x11StageMask(count);
+    const enabled = x11StageCount(state.stageMask);
+    if (state.activeStage > enabled) state.activeStage = enabled;
+    await this.writeX11Dpi();
+    if (this.lastStatus) {
+      this.lastStatus = {
+        ...this.lastStatus,
+        dpiStageCount: enabled,
+        activeDpiStage: state.activeStage - 1,
+        dpi: state.stages[state.activeStage - 1] ?? this.lastStatus.dpi,
+      } as MouseStatus;
+    }
+    return enabled;
+  }
+
+  /** One stage's DPI light colour, `#rrggbb`. `stage` is 0-based. */
+  async setDpiStageColor(stage: number, color: string): Promise<string> {
+    this.requireX11Dpi();
+    if (!Number.isInteger(stage) || stage < 0 || stage >= X11_DPI_STAGE_COUNT) {
+      throw new RangeError(`This mouse has no DPI stage ${stage + 1}.`);
+    }
+    const rgb = x11ParseColor(color);
+    if (!rgb) throw new RangeError(`Not a colour: ${color}`);
+    const state = x11DpiStateFor(this.device.productId);
+    state.colors[stage] = rgb;
+    await this.writeX11Dpi();
+    const hex = x11ColorHex(rgb);
+    if (this.lastStatus) {
+      this.lastStatus = { ...this.lastStatus, dpiStageColors: state.colors.slice(0, X11_DPI_STAGE_COUNT).map(x11ColorHex) } as MouseStatus;
+    }
+    return hex;
   }
 
   async setAngleSnapping(enabled: boolean): Promise<boolean> {

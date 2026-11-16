@@ -19,6 +19,18 @@ export const X11_DPI_MIN = 50;
 export const X11_DPI_MAX = 22000;
 export const X11_DPI_STEP = 50;
 export const X11_DPI_DEFAULT_ACTIVE = 2;
+/** Byte 5: which stages the DPI button cycles through (bit per stage). */
+export const X11_DPI_ALL_STAGES_MASK = 0x3f;
+/**
+ * Bytes 25..48: eight RGB slots, the first six being each stage's DPI light
+ * (the factory palette below: red, green, blue, yellow, cyan, magenta, then
+ * orange and white for the two slots past the sixth stage).
+ */
+export const X11_DPI_COLOR_SLOTS = 8;
+export const X11_DPI_DEFAULT_COLORS: readonly (readonly [number, number, number])[] = [
+  [0xff, 0x00, 0x00], [0x00, 0xff, 0x00], [0x00, 0x00, 0xff], [0xff, 0xff, 0x00],
+  [0x00, 0xff, 0xff], [0xff, 0x00, 0xff], [0xff, 0x40, 0x00], [0xff, 0xff, 0xff],
+];
 
 /** X11 factory stage table (DpiBuilder.DEFAULT_OPTIONS upstream). */
 export const X11_DPI_DEFAULT_STAGES: readonly number[] = [800, 1600, 2400, 3200, 5000, 22000];
@@ -131,6 +143,10 @@ export interface X11DpiConfig {
   activeStage: number;
   angleSnap: boolean;
   rippleControl: boolean;
+  /** Enabled-stage mask (byte 5); all six when absent. */
+  stageMask?: number;
+  /** RGB per colour slot (bytes 25..48); the factory palette when absent. */
+  colors?: readonly (readonly [number, number, number])[];
   /** Wired units take only the first 52 bytes. */
   wired?: boolean;
   /**
@@ -159,7 +175,7 @@ export function buildX11DpiReport(config: X11DpiConfig): Uint8Array {
   buffer[2] = 0x01;
   buffer[3] = config.angleSnap ? 0x01 : 0x00;
   buffer[4] = config.rippleControl ? 0x01 : 0x00;
-  buffer[5] = 0x3f;
+  buffer[5] = (config.stageMask ?? X11_DPI_ALL_STAGES_MASK) & X11_DPI_ALL_STAGES_MASK || X11_DPI_ALL_STAGES_MASK;
 
   let mask = 0;
   for (let i = 0; i < X11_DPI_STAGE_COUNT; i++) {
@@ -174,20 +190,10 @@ export function buildX11DpiReport(config: X11DpiConfig): Uint8Array {
   // 14, 15, 22, 23 stay zero.
   buffer[24] = config.activeStage;
 
-  buffer[25] = 0xff;
-  buffer[29] = 0xff;
-  buffer[33] = 0xff;
-  buffer[34] = 0xff;
-  buffer[35] = 0xff;
-  buffer[38] = 0xff;
-  buffer[39] = 0xff;
-  buffer[40] = 0xff;
-  buffer[42] = 0xff;
-  buffer[43] = 0xff;
-  buffer[44] = 0x40;
-  buffer[46] = 0xff;
-  buffer[47] = 0xff;
-  buffer[48] = 0xff;
+  for (let slot = 0; slot < X11_DPI_COLOR_SLOTS; slot++) {
+    const rgb = config.colors?.[slot] ?? X11_DPI_DEFAULT_COLORS[slot]!;
+    for (let c = 0; c < 3; c++) buffer[25 + slot * 3 + c] = rgb[c]! & 0xff;
+  }
   buffer[49] = 0x02;
 
   const sum = checksum(buffer);
@@ -234,10 +240,42 @@ export function decodeX11DpiReport(data: Uint8Array): X11DpiConfig | null {
   }
 
   const activeStage = Math.min(6, Math.max(1, buffer[24]));
+  const colors: [number, number, number][] = [];
+  for (let slot = 0; slot < X11_DPI_COLOR_SLOTS; slot++) {
+    colors.push([buffer[25 + slot * 3]!, buffer[26 + slot * 3]!, buffer[27 + slot * 3]!]);
+  }
   return {
     stages,
     activeStage,
     angleSnap: buffer[3] === 0x01,
     rippleControl: buffer[4] === 0x01,
+    stageMask: (buffer[5] & X11_DPI_ALL_STAGES_MASK) || X11_DPI_ALL_STAGES_MASK,
+    colors,
   };
+}
+
+/** How many stages, from stage 1, a mask enables (the firmware cycles a prefix). */
+export function x11StageCount(mask: number): number {
+  let count = 0;
+  while (count < X11_DPI_STAGE_COUNT && (mask >> count) & 0x01) count++;
+  return Math.max(1, count);
+}
+
+/** The mask that enables stages 1..count. */
+export function x11StageMask(count: number): number {
+  const n = Math.min(X11_DPI_STAGE_COUNT, Math.max(1, Math.round(count)));
+  return (1 << n) - 1;
+}
+
+/** `#rrggbb` for an RGB slot. */
+export function x11ColorHex(rgb: readonly number[]): string {
+  return `#${rgb.slice(0, 3).map((c) => (c & 0xff).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** RGB for `#rrggbb` (or `rrggbb`); null when malformed. */
+export function x11ParseColor(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1]!, 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
 }
