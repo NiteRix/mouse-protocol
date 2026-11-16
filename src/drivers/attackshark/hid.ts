@@ -796,7 +796,10 @@ export class AttackSharkHidClient {
           || this.family === "25a7"
           || (this.family === "1d57-x11" && this.x11ConfigReachable),
         hideUnsupportedPollingRates: true,
-        hideProcessingCard: true,
+        // Angle snapping and ripple control ride in the DPI report, so they
+        // are offered wherever that report is (no motion sync here).
+        hideProcessingCard: !dpiState,
+        hideMotionSync: true,
         // Wireless X11-family units push battery on their own. WebHID only
         // shows the column when the browser can see the battery input report
         // (usually hidden under the protected system-control collection); a
